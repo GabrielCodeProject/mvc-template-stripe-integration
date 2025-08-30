@@ -38,7 +38,7 @@ export interface AuthState {
 }
 
 export interface OAuth2FAData {
-  user: any;
+  user: Record<string, unknown>;
   requires2FA: boolean;
   twoFactorToken?: string;
 }
@@ -52,12 +52,31 @@ export interface AuthManagerState {
     | "reset-password"
     | null;
   authState: AuthState;
-  user: any | null;
+  user: Record<string, unknown> | null;
   twoFactorData: OAuth2FAData | null;
 }
 
-// Password strength types
+// Password strength types (enhanced)
+export interface PasswordRequirements {
+  length: boolean;
+  uppercase: boolean;
+  lowercase: boolean;
+  numbers: boolean;
+  symbols: boolean;
+  entropy: boolean;
+  common: boolean;
+}
+
 export interface PasswordStrength {
+  score: number; // 0-100
+  level: 'weak' | 'fair' | 'good' | 'strong';
+  entropy: number;
+  feedback: string[];
+  requirements: PasswordRequirements;
+}
+
+// Legacy interface for backward compatibility
+export interface LegacyPasswordStrength {
   score: number; // 0-4
   feedback: string[];
   hasLowercase: boolean;
@@ -80,14 +99,14 @@ export interface OAuthProviderConfig {
 // Form submission result types
 export interface AuthActionResult {
   success: boolean;
-  data?: any;
+  data?: Record<string, unknown>;
   serverError?: string;
   validationErrors?: Record<string, string[]>;
 }
 
 export interface LoginActionResult extends AuthActionResult {
   data?: {
-    user: any;
+    user: Record<string, unknown>;
     requires2FA?: boolean;
     sessionExpires?: string;
   };
@@ -96,6 +115,42 @@ export interface LoginActionResult extends AuthActionResult {
 export interface RegisterActionResult extends AuthActionResult {
   data?: {
     requiresVerification: boolean;
+    message: string;
+  };
+}
+
+// Forgot Password form types
+export interface ForgotPasswordFormData {
+  email: string;
+}
+
+export interface ForgotPasswordFormErrors {
+  email?: string;
+  general?: string;
+}
+
+// Reset Password form types
+export interface ResetPasswordFormData {
+  password: string;
+  confirmPassword: string;
+}
+
+export interface ResetPasswordFormErrors {
+  password?: string;
+  confirmPassword?: string;
+  general?: string;
+  token?: string;
+}
+
+// Password reset action result types
+export interface ForgotPasswordActionResult extends AuthActionResult {
+  data?: {
+    message: string;
+  };
+}
+
+export interface ResetPasswordActionResult extends AuthActionResult {
+  data?: {
     message: string;
   };
 }

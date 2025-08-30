@@ -268,14 +268,39 @@ export const initiatePasswordResetAction = action
     })
   )
   .action(async ({ parsedInput }) => {
-    const authService = AuthService.getInstance();
-    await authService.initiatePasswordReset(parsedInput.email);
+    const { userAgent, ipAddress } = await getClientInfo();
+    
+    try {
+      const { PasswordResetService } = await import("@/services/PasswordResetService");
+      const passwordResetService = PasswordResetService.getInstance();
+      
+      const result = await passwordResetService.initiatePasswordReset({
+        email: parsedInput.email,
+        ipAddress,
+        userAgent,
+      });
 
-    return {
-      success: true,
-      message:
-        "If an account with that email exists, we've sent password reset instructions.",
-    };
+      return {
+        success: result.success,
+        message: result.message,
+        rateLimitInfo: result.rateLimitInfo,
+      };
+    } catch (error) {
+      const { RateLimitError, SecurityError } = await import("@/lib/password-reset-utils");
+      
+      if (error instanceof RateLimitError) {
+        const retryAfterSeconds = Math.ceil((error.retryAfterMs || 0) / 1000);
+        throw new Error(`Too many requests. Try again in ${retryAfterSeconds} seconds.`);
+      }
+      
+      if (error instanceof SecurityError) {
+        throw new Error(error.message);
+      }
+      
+      // Log unexpected errors but don't expose details
+      console.error("Password reset initiation error:", error);
+      throw new Error("Password reset request failed. Please try again later.");
+    }
   });
 
 // Reset password schema
@@ -305,14 +330,75 @@ const resetPasswordSchema = z
 export const resetPasswordAction = action
   .schema(resetPasswordSchema)
   .action(async ({ parsedInput }) => {
-    const authService = AuthService.getInstance();
-    await authService.resetPassword(parsedInput.token, parsedInput.password);
+    const { userAgent, ipAddress } = await getClientInfo();
+    
+    try {
+      const { PasswordResetService } = await import("@/services/PasswordResetService");
+      const passwordResetService = PasswordResetService.getInstance();
+      
+      const result = await passwordResetService.resetPassword({
+        token: parsedInput.token,
+        newPassword: parsedInput.password,
+        confirmPassword: parsedInput.confirmPassword,
+        ipAddress,
+        userAgent,
+      });
 
-    return {
-      success: true,
-      message:
-        "Password reset successfully! You can now log in with your new password.",
-    };
+      return {
+        success: result.success,
+        message: result.message,
+        revokedSessions: result.revokedSessions,
+      };
+    } catch (error) {
+      const { TokenError, SecurityError } = await import("@/lib/password-reset-utils");
+      
+      if (error instanceof TokenError) {
+        throw new Error("Invalid or expired reset token. Please request a new password reset.");
+      }
+      
+      if (error instanceof SecurityError) {
+        throw new Error(error.message);
+      }
+      
+      // Log unexpected errors but don't expose details
+      console.error("Password reset completion error:", error);
+      throw new Error("Password reset failed. Please try again or request a new reset link.");
+    }
+  });
+
+// Validate Password Reset Token Action
+export const validateResetTokenAction = action
+  .schema(
+    z.object({
+      token: z.string().min(1, "Reset token is required"),
+    })
+  )
+  .action(async ({ parsedInput }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
+    
+    try {
+      const { PasswordResetService } = await import("@/services/PasswordResetService");
+      const passwordResetService = PasswordResetService.getInstance();
+      
+      const result = await passwordResetService.validateResetToken({
+        token: parsedInput.token,
+        ipAddress,
+        userAgent,
+      });
+
+      return {
+        isValid: result.isValid,
+        errors: result.errors,
+        tokenData: result.tokenData,
+      };
+    } catch (error) {
+      // Log unexpected errors but don't expose details
+      console.error("Token validation error:", error);
+      return {
+        isValid: false,
+        errors: ["Token validation failed"],
+      };
+    }
   });
 
 // Change password schema

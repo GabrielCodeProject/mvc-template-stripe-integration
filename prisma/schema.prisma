@@ -38,6 +38,7 @@ model User {
   lastLoginAt       DateTime?
   accounts          Account[]
   sessions          Session[]
+  passwordResetTokens PasswordResetToken[]
 
   @@index([email])
   @@index([role])
@@ -62,6 +63,9 @@ model Account {
   verificationToken     String?   @unique
   resetToken            String?   @unique
   resetTokenExpiresAt   DateTime?
+  resetTokenHash        String?   // SHA-256 hash of reset token for security
+  resetRequestIp        String?   // IP address of reset request
+  resetRequestUserAgent String?   // User agent of reset request
   twoFactorSecret       String?
   backupCodes           String[]
   user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -70,6 +74,7 @@ model Account {
   @@index([userId])
   @@index([verificationToken])
   @@index([resetToken])
+  @@index([resetTokenHash])
   @@map("accounts")
 }
 
@@ -90,4 +95,82 @@ model Session {
   @@index([token])
   @@index([isActive])
   @@map("sessions")
+}
+
+// Email rate limiting table
+model EmailRateLimit {
+  id          String   @id @default(cuid())
+  email       String   
+  type        String   // 'password_reset', 'verification', etc.
+  requestCount Int     @default(1)
+  windowStart DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([email, type])
+  @@index([email])
+  @@index([type])
+  @@index([windowStart])
+  @@map("email_rate_limits")
+}
+
+// Password reset token tracking for enhanced security
+model PasswordResetToken {
+  id          String   @id @default(cuid())
+  userId      String
+  tokenHash   String   @unique // SHA-256 hash of the actual token
+  expiresAt   DateTime
+  ipAddress   String?
+  userAgent   String?
+  isUsed      Boolean  @default(false)
+  usedAt      DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@index([ipAddress])
+  @@index([isUsed])
+  @@map("password_reset_tokens")
+}
+
+// IP-based rate limiting for additional security
+model IpRateLimit {
+  id           String   @id @default(cuid())
+  ipAddress    String
+  action       String   // 'password_reset', 'login_attempt', etc.
+  requestCount Int      @default(1)
+  windowStart  DateTime @default(now())
+  blockedUntil DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([ipAddress, action])
+  @@index([ipAddress])
+  @@index([action])
+  @@index([windowStart])
+  @@index([blockedUntil])
+  @@map("ip_rate_limits")
+}
+
+// Security audit log for tracking authentication events
+model SecurityAuditLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  email       String?
+  action      String   // 'password_reset_requested', 'password_reset_completed', 'login_failed', etc.
+  details     Json?    // Additional context (IP, user agent, etc.)
+  success     Boolean
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([email])
+  @@index([action])
+  @@index([createdAt])
+  @@index([ipAddress])
+  @@map("security_audit_logs")
 }

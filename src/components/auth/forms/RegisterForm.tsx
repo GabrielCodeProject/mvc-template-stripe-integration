@@ -8,9 +8,12 @@ import {
   OAuthProvider,
   OAuthProviderConfig,
   PasswordStrength,
+  LegacyPasswordStrength,
   RegisterFormData,
   RegisterFormErrors,
 } from "../types/auth.types";
+import PasswordStrengthIndicator from '../PasswordStrengthIndicator';
+import { calculatePasswordStrength } from '@/lib/password-strength';
 
 interface RegisterFormProps {
   onSuccess?: (result: any) => void;
@@ -45,13 +48,17 @@ export default function RegisterForm({
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [passwordStrength, setPasswordStrength] = useState<PasswordStrength | null>(null);
 
   const validateEmail = (email: string): boolean => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     return emailRegex.test(email);
   };
 
-  const checkPasswordStrength = (password: string): PasswordStrength => {
+  // Legacy password strength check for backward compatibility
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const checkPasswordStrength = (password: string): LegacyPasswordStrength => {
     const hasLowercase = /[a-z]/.test(password);
     const hasUppercase = /[A-Z]/.test(password);
     const hasNumber = /\d/.test(password);
@@ -84,18 +91,9 @@ export default function RegisterForm({
     };
   };
 
-  const getPasswordStrengthColor = (score: number): string => {
-    if (score <= 2) return "bg-red-500";
-    if (score <= 3) return "bg-yellow-500";
-    if (score <= 4) return "bg-blue-500";
-    return "bg-green-500";
-  };
-
-  const getPasswordStrengthText = (score: number): string => {
-    if (score <= 2) return "Weak";
-    if (score <= 3) return "Fair";
-    if (score <= 4) return "Good";
-    return "Strong";
+  // Password strength change handler
+  const handlePasswordStrengthChange = (strength: PasswordStrength) => {
+    setPasswordStrength(strength);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -119,15 +117,18 @@ export default function RegisterForm({
       newErrors.email = "Invalid email format";
     }
 
-    // Password validation
+    // Password validation using enhanced password strength
     if (!formData.password) {
       newErrors.password = "Password is required";
     } else {
-      const strength = checkPasswordStrength(formData.password);
-      if (strength.feedback.length > 0) {
-        newErrors.password = `Password must include: ${strength.feedback.join(
-          ", "
-        )}`;
+      const strength = calculatePasswordStrength(formData.password);
+      
+      // Require minimum "good" strength
+      if (strength.level === 'weak' || strength.level === 'fair') {
+        newErrors.password = `Password is too ${strength.level}. ${strength.feedback.join(', ')}`;
+      } else if (strength.feedback.length > 0) {
+        // Even for good/strong passwords, show remaining feedback as warnings
+        // but don't prevent submission
       }
     }
 
@@ -215,9 +216,10 @@ export default function RegisterForm({
     console.log(`OAuth registration with ${provider}`);
   };
 
-  const passwordStrength = formData.password
-    ? checkPasswordStrength(formData.password)
-    : null;
+  // Legacy password strength for backward compatibility if needed
+  // const legacyPasswordStrength = formData.password
+  //   ? checkPasswordStrength(formData.password)
+  //   : null;
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 w-full max-w-md mx-auto">
@@ -360,35 +362,16 @@ export default function RegisterForm({
             </button>
           </div>
 
-          {/* Password Strength Indicator */}
-          {formData.password && passwordStrength && (
-            <div className="mt-2">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  Password strength
-                </span>
-                <span
-                  className={`text-xs font-medium ${
-                    passwordStrength.score <= 2
-                      ? "text-red-600 dark:text-red-400"
-                      : passwordStrength.score <= 3
-                      ? "text-yellow-600 dark:text-yellow-400"
-                      : passwordStrength.score <= 4
-                      ? "text-blue-600 dark:text-blue-400"
-                      : "text-green-600 dark:text-green-400"
-                  }`}
-                >
-                  {getPasswordStrengthText(passwordStrength.score)}
-                </span>
-              </div>
-              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                <div
-                  className={`h-2 rounded-full transition-all duration-300 ${getPasswordStrengthColor(
-                    passwordStrength.score
-                  )}`}
-                  style={{ width: `${(passwordStrength.score / 5) * 100}%` }}
-                />
-              </div>
+          {/* Enhanced Password Strength Indicator */}
+          {formData.password && (
+            <div className="mt-3">
+              <PasswordStrengthIndicator
+                password={formData.password}
+                onChange={handlePasswordStrengthChange}
+                showRequirements={true}
+                minStrength="good"
+                className=""
+              />
             </div>
           )}
 
