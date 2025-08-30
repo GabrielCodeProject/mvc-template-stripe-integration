@@ -2,6 +2,8 @@ import { AuthUser } from '@/models/AuthUser';
 import { Session } from '@/models/Session';
 import { AuthRepository } from '@/repositories/AuthRepository';
 import { SessionService } from './SessionService';
+import { SecurityAuditLogService } from './SecurityAuditLogService';
+import { SecurityAction, SecuritySeverity } from '@/models/SecurityAuditLog';
 import crypto from 'crypto';
 
 interface RegisterInput {
@@ -27,11 +29,13 @@ interface TwoFactorSetup {
 export class AuthService {
   private authRepository: AuthRepository;
   private sessionService: SessionService;
+  private auditService: SecurityAuditLogService;
   private static instance: AuthService;
 
   private constructor() {
     this.authRepository = AuthRepository.getInstance();
     this.sessionService = SessionService.getInstance();
+    this.auditService = SecurityAuditLogService.getInstance();
   }
 
   public static getInstance(): AuthService {
@@ -42,49 +46,124 @@ export class AuthService {
   }
 
   // User registration
-  public async register(data: RegisterInput): Promise<AuthUser> {
-    // Validate input
-    if (!data.email || !data.password || !data.name) {
-      throw new Error('Email, password, and name are required');
+  public async register(data: RegisterInput, ipAddress?: string, userAgent?: string): Promise<AuthUser> {
+    try {
+      // Validate input
+      if (!data.email || !data.password || !data.name) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.USER_CREATED,
+          {
+            email: data.email,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: 'Missing required fields',
+              providedFields: {
+                email: !!data.email,
+                password: !!data.password,
+                name: !!data.name
+              }
+            }
+          },
+          false
+        );
+        throw new Error('Email, password, and name are required');
+      }
+
+      if (data.password.length < 8) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.USER_CREATED,
+          {
+            email: data.email,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: 'Password too short',
+              passwordLength: data.password.length
+            }
+          },
+          false
+        );
+        throw new Error('Password must be at least 8 characters long');
+      }
+
+      // Check if user already exists
+      const existingUser = await this.authRepository.findByEmail(data.email);
+      if (existingUser) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.USER_CREATED,
+          {
+            email: data.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User already exists' }
+          },
+          false
+        );
+        throw new Error('User with this email already exists');
+      }
+
+      // Create user
+      const user = new AuthUser({
+        id: this.generateId(),
+        email: data.email.toLowerCase().trim(),
+        name: data.name.trim(),
+        emailVerified: false, // Will be verified via email
+        isActive: true
+      });
+
+      // Set password
+      await user.setPassword(data.password);
+
+      // Generate verification token
+      const verificationToken = user.generateVerificationToken();
+
+      // Save to database
+      const savedUser = await this.authRepository.createWithPassword(
+        user.email,
+        user.passwordHash!,
+        user.name,
+        verificationToken
+      );
+
+      // Log successful registration
+      await this.auditService.logUserManagementEvent(
+        SecurityAction.USER_CREATED,
+        {
+          userId: savedUser.id,
+          email: savedUser.email,
+          ipAddress,
+          userAgent,
+          eventData: {
+            name: savedUser.name,
+            requiresEmailVerification: !savedUser.emailVerified
+          }
+        }
+      );
+
+      // TODO: Send verification email
+      // await this.emailService.sendVerificationEmail(savedUser.email, verificationToken);
+
+      return savedUser;
+    } catch (error) {
+      // Log failed registration if not already logged
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('required') && !errorMessage.includes('too short') && !errorMessage.includes('already exists')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.USER_CREATED,
+          {
+            email: data.email,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage
+            }
+          },
+          false
+        );
+      }
+      throw error;
     }
-
-    if (data.password.length < 8) {
-      throw new Error('Password must be at least 8 characters long');
-    }
-
-    // Check if user already exists
-    const existingUser = await this.authRepository.findByEmail(data.email);
-    if (existingUser) {
-      throw new Error('User with this email already exists');
-    }
-
-    // Create user
-    const user = new AuthUser({
-      id: this.generateId(),
-      email: data.email.toLowerCase().trim(),
-      name: data.name.trim(),
-      emailVerified: false, // Will be verified via email
-      isActive: true
-    });
-
-    // Set password
-    await user.setPassword(data.password);
-
-    // Generate verification token
-    const verificationToken = user.generateVerificationToken();
-
-    // Save to database
-    const savedUser = await this.authRepository.createWithPassword(
-      user.email,
-      user.passwordHash!,
-      user.name,
-      verificationToken
-    );
-
-    // TODO: Send verification email
-    // await this.emailService.sendVerificationEmail(savedUser.email, verificationToken);
-
-    return savedUser;
   }
 
   // User login
@@ -95,59 +174,163 @@ export class AuthService {
     ipAddress?: string,
     userAgent?: string
   ): Promise<LoginResult> {
-    // Validate input
-    if (!email || !password) {
-      throw new Error('Email and password are required');
+    const normalizedEmail = email.toLowerCase().trim();
+    
+    try {
+      // Validate input
+      if (!email || !password) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGIN_FAILED,
+          {
+            email: normalizedEmail,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Missing email or password' }
+          },
+          false
+        );
+        throw new Error('Email and password are required');
+      }
+
+      // Find user
+      const user = await this.authRepository.findByEmail(normalizedEmail);
+      if (!user) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGIN_FAILED,
+          {
+            email: normalizedEmail,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User not found' }
+          },
+          false
+        );
+        throw new Error('Invalid credentials');
+      }
+
+      // Check if user is active
+      if (!user.isActive) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGIN_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Account disabled' }
+          },
+          false
+        );
+        throw new Error('Account is disabled');
+      }
+
+      // Verify password
+      const validPassword = await user.verifyPassword(password);
+      if (!validPassword) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGIN_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Invalid password' }
+          },
+          false
+        );
+        throw new Error('Invalid credentials');
+      }
+
+      // Check if email is verified
+      if (!user.emailVerified) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGIN_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Email not verified' }
+          },
+          false
+        );
+        throw new Error('Please verify your email address first');
+      }
+
+      // Check if 2FA is enabled
+      if (user.twoFactorEnabled) {
+        // Generate temporary 2FA token
+        const twoFactorToken = this.generateTwoFactorToken(user.id);
+        
+        // Log partial login success (pending 2FA)
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGIN,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              requires2FA: true,
+              rememberMe,
+              partialLogin: true
+            }
+          }
+        );
+        
+        return {
+          user,
+          session: null as any, // No session until 2FA is completed
+          requires2FA: true,
+          twoFactorToken
+        };
+      }
+
+      // Create session
+      const sessionHours = rememberMe ? 30 * 24 : 24; // 30 days vs 1 day
+      const session = await this.sessionService.createSession(
+        user.id,
+        sessionHours,
+        ipAddress,
+        userAgent
+      );
+
+      // Update last login
+      await this.authRepository.updateLastLogin(user.id);
+
+      // Log successful login
+      await this.auditService.logSuccessfulLogin(user.id, user.email, {
+        ipAddress,
+        userAgent,
+        sessionId: session.id,
+        eventData: {
+          rememberMe,
+          sessionDuration: `${sessionHours} hours`
+        }
+      });
+
+      return { user, session };
+    } catch (error) {
+      // Log any unexpected errors
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('required') && !errorMessage.includes('credentials') && 
+          !errorMessage.includes('disabled') && !errorMessage.includes('verify')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGIN_FAILED,
+          {
+            email: normalizedEmail,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage,
+              unexpected: true
+            }
+          },
+          false
+        );
+      }
+      throw error;
     }
-
-    // Find user
-    const user = await this.authRepository.findByEmail(email.toLowerCase().trim());
-    if (!user) {
-      throw new Error('Invalid credentials');
-    }
-
-    // Check if user is active
-    if (!user.isActive) {
-      throw new Error('Account is disabled');
-    }
-
-    // Verify password
-    const validPassword = await user.verifyPassword(password);
-    if (!validPassword) {
-      throw new Error('Invalid credentials');
-    }
-
-    // Check if email is verified
-    if (!user.emailVerified) {
-      throw new Error('Please verify your email address first');
-    }
-
-    // Check if 2FA is enabled
-    if (user.twoFactorEnabled) {
-      // Generate temporary 2FA token
-      const twoFactorToken = this.generateTwoFactorToken(user.id);
-      
-      return {
-        user,
-        session: null as any, // No session until 2FA is completed
-        requires2FA: true,
-        twoFactorToken
-      };
-    }
-
-    // Create session
-    const sessionHours = rememberMe ? 30 * 24 : 24; // 30 days vs 1 day
-    const session = await this.sessionService.createSession(
-      user.id,
-      sessionHours,
-      ipAddress,
-      userAgent
-    );
-
-    // Update last login
-    await this.authRepository.updateLastLogin(user.id);
-
-    return { user, session };
   }
 
   // Complete 2FA login
@@ -158,71 +341,251 @@ export class AuthService {
     ipAddress?: string,
     userAgent?: string
   ): Promise<LoginResult> {
-    // Validate 2FA token (in real app, store these temporarily in Redis/cache)
-    const userId = this.validateTwoFactorToken(twoFactorToken);
-    if (!userId) {
-      throw new Error('Invalid or expired 2FA token');
-    }
+    try {
+      // Validate 2FA token (in real app, store these temporarily in Redis/cache)
+      const userId = this.validateTwoFactorToken(twoFactorToken);
+      if (!userId) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Invalid 2FA token' }
+          },
+          false
+        );
+        throw new Error('Invalid or expired 2FA token');
+      }
 
-    // Get user
-    const user = await this.authRepository.findById(userId);
-    if (!user) {
-      throw new Error('User not found');
-    }
+      // Get user
+      const user = await this.authRepository.findById(userId);
+      if (!user) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User not found during 2FA' }
+          },
+          false
+        );
+        throw new Error('User not found');
+      }
 
-    // Validate TOTP or backup code
-    const validTOTP = user.validateTOTP(code);
-    const validBackup = !validTOTP && user.validateBackupCode(code);
+      // Validate TOTP or backup code
+      const validTOTP = user.validateTOTP(code);
+      const validBackup = !validTOTP && user.validateBackupCode(code);
 
-    if (!validTOTP && !validBackup) {
-      throw new Error('Invalid 2FA code');
-    }
+      if (!validTOTP && !validBackup) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Invalid 2FA code' }
+          },
+          false
+        );
+        throw new Error('Invalid 2FA code');
+      }
 
-    // If backup code was used, update the user
-    if (validBackup) {
-      await this.authRepository.updateTwoFactor(
+      // If backup code was used, update the user
+      if (validBackup) {
+        await this.authRepository.updateTwoFactor(
+          user.id,
+          undefined,
+          user.backupCodes
+        );
+      }
+
+      // Create session
+      const sessionHours = rememberMe ? 30 * 24 : 24;
+      const session = await this.sessionService.createSession(
         user.id,
-        undefined,
-        user.backupCodes
+        sessionHours,
+        ipAddress,
+        userAgent
       );
+
+      // Update last login
+      await this.authRepository.updateLastLogin(user.id);
+
+      // Log successful 2FA completion
+      await this.auditService.logAuthEvent(
+        SecurityAction.TWO_FACTOR_VERIFIED,
+        {
+          userId: user.id,
+          email: user.email,
+          ipAddress,
+          userAgent,
+          sessionId: session.id,
+          eventData: {
+            method: validBackup ? 'backup_code' : 'totp',
+            rememberMe,
+            sessionDuration: `${sessionHours} hours`
+          }
+        }
+      );
+
+      return { user, session };
+    } catch (error) {
+      // Log any unexpected 2FA errors
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('Invalid') && !errorMessage.includes('expired')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage,
+              unexpected: true
+            }
+          },
+          false
+        );
+      }
+      throw error;
     }
-
-    // Create session
-    const sessionHours = rememberMe ? 30 * 24 : 24;
-    const session = await this.sessionService.createSession(
-      user.id,
-      sessionHours,
-      ipAddress,
-      userAgent
-    );
-
-    // Update last login
-    await this.authRepository.updateLastLogin(user.id);
-
-    return { user, session };
   }
 
   // User logout
-  public async logout(sessionToken: string): Promise<void> {
-    await this.sessionService.revokeSession(sessionToken);
+  public async logout(sessionToken: string, ipAddress?: string, userAgent?: string): Promise<void> {
+    try {
+      // Get session details before revoking for logging
+      const sessionDetails = await this.sessionService.validateSession(sessionToken);
+      
+      await this.sessionService.revokeSession(sessionToken);
+
+      // Log logout
+      if (sessionDetails) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.LOGOUT,
+          {
+            userId: sessionDetails.userId,
+            sessionId: sessionDetails.id,
+            ipAddress,
+            userAgent,
+            eventData: {
+              sessionRevoked: true
+            }
+          }
+        );
+      }
+    } catch (error) {
+      // Still try to log logout attempt even if session details couldn't be retrieved
+      const errorMessage = error instanceof Error ? error.message : 'Logout error';
+      await this.auditService.logAuthEvent(
+        SecurityAction.LOGOUT,
+        {
+          ipAddress,
+          userAgent,
+          eventData: {
+            error: errorMessage,
+            sessionToken: sessionToken.substring(0, 8) + '...' // Log partial token for debugging
+          }
+        },
+        false
+      );
+      throw error;
+    }
   }
 
   // Logout from all devices
-  public async logoutAllDevices(userId: string, currentToken?: string): Promise<number> {
-    return await this.sessionService.revokeAllUserSessions(userId, currentToken);
+  public async logoutAllDevices(userId: string, currentToken?: string, ipAddress?: string, userAgent?: string): Promise<number> {
+    try {
+      const revokedCount = await this.sessionService.revokeAllUserSessions(userId, currentToken);
+
+      // Log mass logout
+      await this.auditService.logAuthEvent(
+        SecurityAction.SESSION_TERMINATED,
+        {
+          userId,
+          ipAddress,
+          userAgent,
+          eventData: {
+            action: 'logout_all_devices',
+            revokedSessions: revokedCount,
+            currentSessionPreserved: !!currentToken
+          }
+        }
+      );
+
+      return revokedCount;
+    } catch (error) {
+      await this.auditService.logAuthEvent(
+        SecurityAction.SESSION_TERMINATED,
+        {
+          userId,
+          ipAddress,
+          userAgent,
+          eventData: {
+            action: 'logout_all_devices_failed',
+            error: (error instanceof Error ? error.message : 'Mass logout error')
+          }
+        },
+        false
+      );
+      throw error;
+    }
   }
 
   // Email verification
-  public async verifyEmail(token: string): Promise<boolean> {
-    const user = await this.authRepository.findByVerificationToken(token);
-    if (!user) {
-      throw new Error('Invalid or expired verification token');
+  public async verifyEmail(token: string, ipAddress?: string, userAgent?: string): Promise<boolean> {
+    try {
+      const user = await this.authRepository.findByVerificationToken(token);
+      if (!user) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.EMAIL_VERIFICATION_FAILED,
+          {
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Invalid verification token', token: token.substring(0, 8) + '...' }
+          },
+          false
+        );
+        throw new Error('Invalid or expired verification token');
+      }
+
+      // Clear verification token and mark email as verified
+      await this.authRepository.clearVerificationToken(user.id);
+
+      // Log successful email verification
+      await this.auditService.logAuthEvent(
+        SecurityAction.EMAIL_VERIFIED,
+        {
+          userId: user.id,
+          email: user.email,
+          ipAddress,
+          userAgent,
+          eventData: {
+            verificationCompleted: true
+          }
+        }
+      );
+
+      return true;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('Invalid')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.EMAIL_VERIFICATION_FAILED,
+          {
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage,
+              unexpected: true
+            }
+          },
+          false
+        );
+      }
+      throw error;
     }
-
-    // Clear verification token and mark email as verified
-    await this.authRepository.clearVerificationToken(user.id);
-
-    return true;
   }
 
   // Resend verification email
@@ -317,73 +680,461 @@ export class AuthService {
   }
 
   // Setup 2FA
-  public async setup2FA(userId: string): Promise<TwoFactorSetup> {
-    const user = await this.authRepository.findById(userId);
-    if (!user) {
-      throw new Error('User not found');
+  public async setup2FA(userId: string, ipAddress?: string, userAgent?: string): Promise<TwoFactorSetup> {
+    try {
+      const user = await this.authRepository.findById(userId);
+      if (!user) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User not found during 2FA setup' }
+          },
+          false
+        );
+        throw new Error('User not found');
+      }
+
+      if (user.twoFactorEnabled) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: '2FA already enabled during setup' }
+          },
+          false
+        );
+        throw new Error('Two-factor authentication is already enabled');
+      }
+
+      // Generate 2FA secret and backup codes with QR code
+      const { secret, qrCodeUrl, backupCodes } = user.generateTwoFactorSecret();
+
+      // Save encrypted secret to database (but don't enable yet)
+      await this.authRepository.updateTwoFactor(
+        user.id,
+        user.twoFactorSecret, // This is already encrypted by the model
+        user.backupCodes, // These are already hashed by the model
+        false // Not enabled until verified
+      );
+
+      // Log 2FA setup initiation
+      await this.auditService.logAuthEvent(
+        SecurityAction.TWO_FACTOR_SETUP,
+        {
+          userId: user.id,
+          email: user.email,
+          ipAddress,
+          userAgent,
+          eventData: {
+            action: 'setup_initiated',
+            backupCodesGenerated: backupCodes.length
+          }
+        }
+      );
+
+      return {
+        secret,
+        qrCode: qrCodeUrl,
+        backupCodes
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('not found') && !errorMessage.includes('already enabled')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage,
+              unexpected: true,
+              action: 'setup_failed'
+            }
+          },
+          false
+        );
+      }
+      throw error;
     }
-
-    if (user.twoFactorEnabled) {
-      throw new Error('Two-factor authentication is already enabled');
-    }
-
-    // Generate 2FA secret and backup codes
-    const { secret, backupCodes } = user.generateTwoFactorSecret();
-
-    // Save to database (but don't enable yet)
-    await this.authRepository.updateTwoFactor(
-      user.id,
-      secret,
-      backupCodes,
-      false // Not enabled until verified
-    );
-
-    // Generate QR code URL
-    const qrCode = `otpauth://totp/${encodeURIComponent(user.email)}?secret=${secret}&issuer=${encodeURIComponent(process.env.APP_NAME || 'MyApp')}`;
-
-    return {
-      secret,
-      qrCode,
-      backupCodes
-    };
   }
 
   // Enable 2FA (after verification)
-  public async enable2FA(userId: string, code: string): Promise<void> {
-    const user = await this.authRepository.findById(userId);
-    if (!user) {
-      throw new Error('User not found');
-    }
+  public async enable2FA(userId: string, code: string, ipAddress?: string, userAgent?: string): Promise<void> {
+    try {
+      const user = await this.authRepository.findById(userId);
+      if (!user) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User not found during 2FA enable' }
+          },
+          false
+        );
+        throw new Error('User not found');
+      }
 
-    if (user.twoFactorEnabled) {
-      throw new Error('Two-factor authentication is already enabled');
-    }
+      if (user.twoFactorEnabled) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: '2FA already enabled' }
+          },
+          false
+        );
+        throw new Error('Two-factor authentication is already enabled');
+      }
 
-    // Validate TOTP code
-    if (!user.validateTOTP(code)) {
-      throw new Error('Invalid 2FA code');
-    }
+      // Validate TOTP code
+      if (!user.validateTOTP(code)) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Invalid TOTP code during enable' }
+          },
+          false
+        );
+        throw new Error('Invalid 2FA code');
+      }
 
-    // Enable 2FA
-    await this.authRepository.updateTwoFactor(user.id, undefined, undefined, true);
+      // Enable 2FA
+      await this.authRepository.updateTwoFactor(user.id, undefined, undefined, true);
+
+      // Log successful 2FA enablement
+      await this.auditService.logAuthEvent(
+        SecurityAction.TWO_FACTOR_ENABLED,
+        {
+          userId: user.id,
+          email: user.email,
+          ipAddress,
+          userAgent,
+          eventData: {
+            securityEnhancement: true
+          }
+        }
+      );
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('not found') && !errorMessage.includes('already enabled') && !errorMessage.includes('Invalid')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage,
+              unexpected: true
+            }
+          },
+          false
+        );
+      }
+      throw error;
+    }
   }
 
   // Disable 2FA
-  public async disable2FA(userId: string, password: string): Promise<void> {
-    const user = await this.authRepository.findById(userId);
-    if (!user) {
-      throw new Error('User not found');
-    }
+  public async disable2FA(userId: string, password: string, ipAddress?: string, userAgent?: string): Promise<void> {
+    try {
+      const user = await this.authRepository.findById(userId);
+      if (!user) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User not found during 2FA disable' }
+          },
+          false
+        );
+        throw new Error('User not found');
+      }
 
-    // Verify password
-    const validPassword = await user.verifyPassword(password);
-    if (!validPassword) {
-      throw new Error('Invalid password');
-    }
+      if (!user.twoFactorEnabled) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: '2FA not enabled during disable attempt' }
+          },
+          false
+        );
+        throw new Error('Two-factor authentication is not enabled');
+      }
 
-    // Disable 2FA
-    user.disableTwoFactor();
-    await this.authRepository.updateTwoFactor(user.id, undefined, [], false);
+      // Verify password
+      const validPassword = await user.verifyPassword(password);
+      if (!validPassword) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Invalid password during 2FA disable' }
+          },
+          false
+        );
+        throw new Error('Invalid password');
+      }
+
+      // Disable 2FA
+      user.disableTwoFactor();
+      await this.authRepository.updateTwoFactor(user.id, undefined, [], false);
+
+      // Log successful 2FA disablement
+      await this.auditService.logAuthEvent(
+        SecurityAction.TWO_FACTOR_DISABLED,
+        {
+          userId: user.id,
+          email: user.email,
+          ipAddress,
+          userAgent,
+          eventData: {
+            securityChange: true,
+            action: '2fa_disabled'
+          }
+        }
+      );
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('not found') && !errorMessage.includes('not enabled') && !errorMessage.includes('Invalid password')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage,
+              unexpected: true,
+              action: 'disable_failed'
+            }
+          },
+          false
+        );
+      }
+      throw error;
+    }
+  }
+
+  // Generate new backup codes
+  public async generateNewBackupCodes(userId: string, password: string, ipAddress?: string, userAgent?: string): Promise<string[]> {
+    try {
+      const user = await this.authRepository.findById(userId);
+      if (!user) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User not found during backup code generation' }
+          },
+          false
+        );
+        throw new Error('User not found');
+      }
+
+      if (!user.twoFactorEnabled) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: '2FA not enabled during backup code generation' }
+          },
+          false
+        );
+        throw new Error('Two-factor authentication is not enabled');
+      }
+
+      // Verify password
+      const validPassword = await user.verifyPassword(password);
+      if (!validPassword) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'Invalid password during backup code generation' }
+          },
+          false
+        );
+        throw new Error('Invalid password');
+      }
+
+      // Generate new backup codes
+      const newBackupCodes = user.generateNewBackupCodes();
+
+      // Save to database
+      await this.authRepository.updateTwoFactor(
+        user.id,
+        undefined, // Don't change secret
+        user.backupCodes, // Save hashed codes
+        undefined // Don't change enabled status
+      );
+
+      // Log backup code generation
+      await this.auditService.logAuthEvent(
+        SecurityAction.TWO_FACTOR_BACKUP_CODES_GENERATED,
+        {
+          userId: user.id,
+          email: user.email,
+          ipAddress,
+          userAgent,
+          eventData: {
+            action: 'backup_codes_regenerated',
+            codesGenerated: newBackupCodes.length
+          }
+        }
+      );
+
+      return newBackupCodes; // Return plain codes for user to save
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (!errorMessage.includes('not found') && !errorMessage.includes('not enabled') && !errorMessage.includes('Invalid password')) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { 
+              error: errorMessage,
+              unexpected: true,
+              action: 'backup_codes_generation_failed'
+            }
+          },
+          false
+        );
+      }
+      throw error;
+    }
+  }
+
+  // Verify 2FA code during login or sensitive operations
+  public async verify2FACode(userId: string, code: string, ipAddress?: string, userAgent?: string): Promise<boolean> {
+    try {
+      const user = await this.authRepository.findById(userId);
+      if (!user || !user.twoFactorEnabled) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_FAILED,
+          {
+            userId,
+            ipAddress,
+            userAgent,
+            eventData: { error: 'User not found or 2FA not enabled during verification' }
+          },
+          false
+        );
+        return false;
+      }
+
+      // Try TOTP first
+      const validTOTP = user.validateTOTP(code);
+      if (validTOTP) {
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_VERIFIED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: {
+              method: 'totp',
+              action: 'code_verified'
+            }
+          }
+        );
+        return true;
+      }
+
+      // Try backup code
+      const validBackup = user.validateBackupCode(code);
+      if (validBackup) {
+        // Update database with consumed backup code
+        await this.authRepository.updateTwoFactor(
+          user.id,
+          undefined,
+          user.backupCodes,
+          undefined
+        );
+
+        await this.auditService.logAuthEvent(
+          SecurityAction.TWO_FACTOR_VERIFIED,
+          {
+            userId: user.id,
+            email: user.email,
+            ipAddress,
+            userAgent,
+            eventData: {
+              method: 'backup_code',
+              action: 'backup_code_used',
+              remainingBackupCodes: user.backupCodesRemaining
+            }
+          }
+        );
+        return true;
+      }
+
+      // Invalid code
+      await this.auditService.logAuthEvent(
+        SecurityAction.TWO_FACTOR_FAILED,
+        {
+          userId: user.id,
+          email: user.email,
+          ipAddress,
+          userAgent,
+          eventData: { error: 'Invalid 2FA code provided' }
+        },
+        false
+      );
+      return false;
+    } catch (error) {
+      await this.auditService.logAuthEvent(
+        SecurityAction.TWO_FACTOR_FAILED,
+        {
+          userId,
+          ipAddress,
+          userAgent,
+          eventData: { 
+            error: error instanceof Error ? error.message : 'Unknown error',
+            unexpected: true,
+            action: 'verification_error'
+          }
+        },
+        false
+      );
+      return false;
+    }
   }
 
   // Update user profile

@@ -124,7 +124,7 @@ export class SessionService {
     return await this.sessionRepository.revokeAllByUserId(userId, exceptToken);
   }
 
-  // Get user sessions
+  // Get user sessions with enhanced device information
   public async getUserSessions(
     userId: string,
     currentToken?: string,
@@ -132,19 +132,49 @@ export class SessionService {
   ): Promise<Array<{
     id: string;
     createdAt: Date;
+    updatedAt: Date;
     ipAddress?: string;
     userAgent?: string;
     isActive: boolean;
     isCurrent: boolean;
     timeRemaining?: string;
+    deviceInfo: {
+      browser?: string;
+      os?: string;
+      device?: string;
+      isMobile: boolean;
+      isTablet: boolean;
+      isDesktop: boolean;
+    };
+    deviceDisplayName: string;
+    locationInfo: {
+      ip?: string;
+      displayLocation: string;
+    };
+    lastActiveFormatted: string;
+    deviceIcon: string;
   }>> {
-    const sessions = await this.sessionRepository.getRecentSessions(userId);
+    const sessionModels = await this.sessionRepository.findByUserId(userId, activeOnly);
     
-    return sessions.map(session => ({
-      ...session,
-      isCurrent: currentToken ? session.id === currentToken : false,
-      timeRemaining: session.isActive ? this.formatTimeRemaining(session.createdAt) : undefined
-    }));
+    return sessionModels.map(session => {
+      const safeData = session.toSafeJSON();
+      
+      return {
+        id: safeData.id,
+        createdAt: new Date(safeData.createdAt),
+        updatedAt: new Date(safeData.updatedAt),
+        ipAddress: safeData.ipAddress,
+        userAgent: safeData.userAgent,
+        isActive: safeData.isActive,
+        isCurrent: currentToken ? session.token === currentToken : false,
+        timeRemaining: session.isValid() ? session.getTimeRemainingFormatted() : undefined,
+        deviceInfo: safeData.deviceInfo,
+        deviceDisplayName: safeData.deviceDisplayName,
+        locationInfo: safeData.locationInfo,
+        lastActiveFormatted: safeData.lastActiveFormatted,
+        deviceIcon: safeData.deviceIcon,
+      };
+    });
   }
 
   // Refresh session (create new token, revoke old)

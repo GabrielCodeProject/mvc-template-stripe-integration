@@ -46,7 +46,7 @@ export async function testPasswordResetFlow() {
           ipAddress: testIP,
           userAgent: testUserAgent,
         });
-        console.log(`  Request ${i}: Success - ${result.remainingRequests || 0} remaining`);
+        console.log(`  Request ${i}: Success - ${result.rateLimitInfo?.remainingRequests || 0} remaining`);
       } catch (error: any) {
         console.log(`  Request ${i}: Rate limited - ${error.message}`);
         break;

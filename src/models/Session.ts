@@ -204,11 +204,36 @@ export class Session {
     };
   }
 
-  // Safe serialization (without token for client-side)
-  public toSafeJSON(): Omit<SessionJSON, 'token'> {
+  // Safe serialization (without token for client-side) with device info
+  public toSafeJSON(): Omit<SessionJSON, 'token'> & {
+    deviceInfo: {
+      browser?: string;
+      os?: string;
+      device?: string;
+      isMobile: boolean;
+      isTablet: boolean;
+      isDesktop: boolean;
+    };
+    deviceDisplayName: string;
+    locationInfo: {
+      ip?: string;
+      displayLocation: string;
+    };
+    lastActiveFormatted: string;
+    deviceIcon: string;
+  } {
     const json = this.toJSON();
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { token, ...safeJson } = json;
-    return safeJson;
+    
+    return {
+      ...safeJson,
+      deviceInfo: this.getDeviceInfo(),
+      deviceDisplayName: this.getDeviceDisplayName(),
+      locationInfo: this.getLocationInfo(),
+      lastActiveFormatted: this.getLastActiveFormatted(),
+      deviceIcon: this.getDeviceIcon(),
+    };
   }
 
   // Deserialization
@@ -254,6 +279,172 @@ export class Session {
   // Get session age in milliseconds
   public getAge(): number {
     return Date.now() - this._createdAt.getTime();
+  }
+
+  // Parse user agent string for device information
+  public getDeviceInfo(): {
+    browser?: string;
+    os?: string;
+    device?: string;
+    isMobile: boolean;
+    isTablet: boolean;
+    isDesktop: boolean;
+  } {
+    if (!this._userAgent) {
+      return {
+        isMobile: false,
+        isTablet: false,
+        isDesktop: true,
+      };
+    }
+
+    return Session.parseUserAgent(this._userAgent);
+  }
+
+  // Static method to parse user agent
+  public static parseUserAgent(userAgent: string): {
+    browser?: string;
+    os?: string;
+    device?: string;
+    isMobile: boolean;
+    isTablet: boolean;
+    isDesktop: boolean;
+  } {
+    const ua = userAgent.toLowerCase();
+    
+    // Browser detection
+    let browser: string | undefined;
+    if (ua.includes('chrome') && !ua.includes('edg')) {
+      browser = 'Chrome';
+    } else if (ua.includes('firefox')) {
+      browser = 'Firefox';
+    } else if (ua.includes('safari') && !ua.includes('chrome')) {
+      browser = 'Safari';
+    } else if (ua.includes('edg')) {
+      browser = 'Edge';
+    } else if (ua.includes('opera') || ua.includes('opr')) {
+      browser = 'Opera';
+    }
+
+    // OS detection
+    let os: string | undefined;
+    if (ua.includes('windows')) {
+      os = 'Windows';
+    } else if (ua.includes('mac')) {
+      os = 'macOS';
+    } else if (ua.includes('linux')) {
+      os = 'Linux';
+    } else if (ua.includes('android')) {
+      os = 'Android';
+    } else if (ua.includes('iphone') || ua.includes('ipad')) {
+      os = 'iOS';
+    }
+
+    // Device type detection
+    const isMobile = /mobile|android|iphone/i.test(ua);
+    const isTablet = /tablet|ipad/i.test(ua);
+    const isDesktop = !isMobile && !isTablet;
+
+    // Device name detection
+    let device: string | undefined;
+    if (ua.includes('iphone')) {
+      device = 'iPhone';
+    } else if (ua.includes('ipad')) {
+      device = 'iPad';
+    } else if (ua.includes('android')) {
+      if (isTablet) {
+        device = 'Android Tablet';
+      } else {
+        device = 'Android Phone';
+      }
+    }
+
+    return {
+      browser,
+      os,
+      device,
+      isMobile,
+      isTablet,
+      isDesktop,
+    };
+  }
+
+  // Get formatted device string for display
+  public getDeviceDisplayName(): string {
+    const deviceInfo = this.getDeviceInfo();
+    
+    if (deviceInfo.device) {
+      return deviceInfo.browser 
+        ? `${deviceInfo.device} • ${deviceInfo.browser}`
+        : deviceInfo.device;
+    }
+    
+    if (deviceInfo.browser && deviceInfo.os) {
+      return `${deviceInfo.browser} on ${deviceInfo.os}`;
+    }
+    
+    if (deviceInfo.browser) {
+      return deviceInfo.browser;
+    }
+    
+    if (deviceInfo.os) {
+      return deviceInfo.os;
+    }
+    
+    return 'Unknown Device';
+  }
+
+  // Get location info from IP (basic implementation)
+  public getLocationInfo(): {
+    ip?: string;
+    displayLocation: string;
+  } {
+    if (!this._ipAddress) {
+      return {
+        displayLocation: 'Unknown Location',
+      };
+    }
+
+    // For now, just show the IP address
+    // In a real application, you would use a geolocation service
+    return {
+      ip: this._ipAddress,
+      displayLocation: `IP: ${this._ipAddress}`,
+    };
+  }
+
+  // Get last active time in human-readable format
+  public getLastActiveFormatted(): string {
+    const now = new Date();
+    const diffMs = now.getTime() - this._updatedAt.getTime();
+    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+    const diffHours = Math.floor(diffMinutes / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMinutes < 1) {
+      return 'Just now';
+    } else if (diffMinutes < 60) {
+      return `${diffMinutes} minute${diffMinutes !== 1 ? 's' : ''} ago`;
+    } else if (diffHours < 24) {
+      return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
+    } else if (diffDays < 30) {
+      return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
+    } else {
+      return this._updatedAt.toLocaleDateString();
+    }
+  }
+
+  // Get session type icon based on device
+  public getDeviceIcon(): string {
+    const deviceInfo = this.getDeviceInfo();
+    
+    if (deviceInfo.isMobile) {
+      return '📱';
+    } else if (deviceInfo.isTablet) {
+      return '📱'; // tablet icon
+    } else {
+      return '💻'; // desktop icon
+    }
   }
 }
 

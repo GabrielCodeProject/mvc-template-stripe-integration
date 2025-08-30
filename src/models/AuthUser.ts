@@ -111,23 +111,38 @@ export class AuthUser extends User {
   }
 
   // Two-factor authentication
-  public generateTwoFactorSecret(): { secret: string; backupCodes: string[] } {
+  public generateTwoFactorSecret(): { secret: string; qrCodeUrl: string; backupCodes: string[] } {
     const secret = speakeasy.generateSecret({
       name: `${this._name} (${this._email})`,
-      issuer: process.env.APP_NAME || "MyApp"
+      issuer: process.env.APP_NAME || "MyApp",
+      length: 32 // More secure length
     });
 
-    this._twoFactorSecret = secret.base32;
+    // Store encrypted secret
+    this._twoFactorSecret = this.encryptSensitiveData(secret.base32);
     
-    // Generate backup codes
-    const backupCodes = Array.from({ length: 8 }, () => 
-      crypto.randomBytes(4).toString('hex').toUpperCase()
+    // Generate 10 backup codes, 8 characters each (alphanumeric)
+    const backupCodes = Array.from({ length: 10 }, () => {
+      const chars = 'ABCDEFGHIJKLMNPQRSTUVWXYZ123456789'; // No O, 0 for clarity
+      let code = '';
+      for (let i = 0; i < 8; i++) {
+        code += chars.charAt(Math.floor(crypto.randomBytes(1)[0] / 256 * chars.length));
+      }
+      return code;
+    });
+    
+    // Store hashed backup codes for security
+    this._backupCodes = backupCodes.map(code => 
+      crypto.createHash('sha256').update(code + this._email).digest('hex')
     );
-    this._backupCodes = backupCodes;
+
+    // Create QR code URL
+    const qrCodeUrl = `otpauth://totp/${encodeURIComponent(this._email)}?secret=${secret.base32}&issuer=${encodeURIComponent(process.env.APP_NAME || 'MyApp')}`;
 
     return {
-      secret: secret.base32,
-      backupCodes
+      secret: secret.base32, // Return unencrypted for QR code generation
+      qrCodeUrl,
+      backupCodes // Return plain codes for user to save
     };
   }
 
@@ -151,19 +166,29 @@ export class AuthUser extends User {
       return false;
     }
 
-    return speakeasy.totp.verify({
-      secret: this._twoFactorSecret,
-      encoding: 'base32',
-      token,
-      window: 2 // Allow some time drift
-    });
+    try {
+      // Decrypt the stored secret
+      const decryptedSecret = this.decryptSensitiveData(this._twoFactorSecret);
+      
+      return speakeasy.totp.verify({
+        secret: decryptedSecret,
+        encoding: 'base32',
+        token: token.replace(/\s/g, ''), // Remove any spaces
+        window: 1 // ±30 seconds window for time drift
+      });
+    } catch (error) {
+      console.error('TOTP validation error:', error);
+      return false;
+    }
   }
 
   public validateBackupCode(code: string): boolean {
-    if (!this._backupCodes) return false;
+    if (!this._backupCodes || this._backupCodes.length === 0) return false;
     
-    const normalizedCode = code.toUpperCase();
-    const index = this._backupCodes.findIndex(bc => bc === normalizedCode);
+    const normalizedCode = code.toUpperCase().replace(/\s/g, '');
+    const hashedCode = crypto.createHash('sha256').update(normalizedCode + this._email).digest('hex');
+    
+    const index = this._backupCodes.findIndex(bc => bc === hashedCode);
     
     if (index === -1) {
       return false;
@@ -176,11 +201,67 @@ export class AuthUser extends User {
   }
 
   public get backupCodes(): string[] {
-    return this._backupCodes ? [...this._backupCodes] : [];
+    // Return empty array - backup codes should never be retrievable after generation
+    return [];
+  }
+
+  public get backupCodesRemaining(): number {
+    return this._backupCodes ? this._backupCodes.length : 0;
+  }
+
+  public generateNewBackupCodes(): string[] {
+    // Generate 10 new backup codes
+    const backupCodes = Array.from({ length: 10 }, () => {
+      const chars = 'ABCDEFGHIJKLMNPQRSTUVWXYZ123456789';
+      let code = '';
+      for (let i = 0; i < 8; i++) {
+        code += chars.charAt(Math.floor(crypto.randomBytes(1)[0] / 256 * chars.length));
+      }
+      return code;
+    });
+    
+    // Store hashed versions
+    this._backupCodes = backupCodes.map(code => 
+      crypto.createHash('sha256').update(code + this._email).digest('hex')
+    );
+    
+    this._updatedAt = new Date();
+    return backupCodes; // Return plain codes for user to save
   }
 
   public get twoFactorSecret(): string | undefined {
     return this._twoFactorSecret;
+  }
+
+  // Encryption methods for sensitive data
+  private encryptSensitiveData(data: string): string {
+    const algorithm = 'aes-256-gcm';
+    const key = crypto.scryptSync(process.env.ENCRYPTION_KEY || 'default-key', 'salt', 32);
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipher(algorithm, key);
+    
+    let encrypted = cipher.update(data, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    
+    return `${iv.toString('hex')}:${encrypted}`;
+  }
+  
+  private decryptSensitiveData(encryptedData: string): string {
+    try {
+      const algorithm = 'aes-256-gcm';
+      const key = crypto.scryptSync(process.env.ENCRYPTION_KEY || 'default-key', 'salt', 32);
+      const [ivHex, encrypted] = encryptedData.split(':');
+      const iv = Buffer.from(ivHex, 'hex');
+      const decipher = crypto.createDecipher(algorithm, key);
+      
+      let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      
+      return decrypted;
+    } catch (error) {
+      console.error('Decryption error:', error);
+      throw new Error('Failed to decrypt sensitive data');
+    }
   }
 
   // Enhanced validation including auth fields
@@ -273,8 +354,9 @@ export class AuthUser extends User {
       verificationToken: credentialsAccount?.verificationToken,
       resetToken: credentialsAccount?.resetToken,
       resetTokenExpiresAt: credentialsAccount?.resetTokenExpiresAt,
-      twoFactorSecret: credentialsAccount?.twoFactorSecret,
-      backupCodes: credentialsAccount?.backupCodes || []
+      // Use User table fields for 2FA data
+      twoFactorSecret: data.twoFactorSecret,
+      backupCodes: data.backupCodes || []
     });
   }
 }

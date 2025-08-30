@@ -1,6 +1,7 @@
 "use server";
 
 import { AuthService } from "@/services/AuthService";
+import { SecurityAction } from "@/models/SecurityAuditLog";
 import { createSafeActionClient } from "next-safe-action";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
@@ -187,8 +188,9 @@ const registerSchema = z.object({
 export const registerAction = action
   .schema(registerSchema)
   .action(async ({ parsedInput }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
     const authService = AuthService.getInstance();
-    const user = await authService.register(parsedInput);
+    const user = await authService.register(parsedInput, ipAddress, userAgent);
 
     return {
       success: true,
@@ -200,8 +202,9 @@ export const registerAction = action
 
 // Logout Action
 export const logoutAction = authAction.action(async ({ ctx }) => {
+  const { userAgent, ipAddress } = await getClientInfo();
   const authService = AuthService.getInstance();
-  await authService.logout(ctx.sessionToken);
+  await authService.logout(ctx.sessionToken, ipAddress, userAgent);
 
   // Clear session cookie
   const cookieStore = await cookies();
@@ -213,10 +216,13 @@ export const logoutAction = authAction.action(async ({ ctx }) => {
 
 // Logout All Devices Action
 export const logoutAllDevicesAction = authAction.action(async ({ ctx }) => {
+  const { userAgent, ipAddress } = await getClientInfo();
   const authService = AuthService.getInstance();
   const revokedCount = await authService.logoutAllDevices(
     ctx.user.id,
-    ctx.sessionToken
+    ctx.sessionToken,
+    ipAddress,
+    userAgent
   );
 
   return {
@@ -234,8 +240,9 @@ export const verifyEmailAction = action
     })
   )
   .action(async ({ parsedInput }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
     const authService = AuthService.getInstance();
-    const success = await authService.verifyEmail(parsedInput.token);
+    const success = await authService.verifyEmail(parsedInput.token, ipAddress, userAgent);
 
     return {
       success,
@@ -477,27 +484,40 @@ export const updateProfileAction = authAction
 
 // Setup 2FA Action
 export const setup2FAAction = authAction.action(async ({ ctx }) => {
+  const { userAgent, ipAddress } = await getClientInfo();
   const authService = AuthService.getInstance();
-  const setup = await authService.setup2FA(ctx.user.id);
+  const setup = await authService.setup2FA(ctx.user.id, ipAddress, userAgent);
+
+  // Generate QR code data URL
+  const { QRCodeUtils } = await import("@/lib/qr-code-utils");
+  const qrCodeImage = await QRCodeUtils.generateTOTPQRCode(
+    setup.secret,
+    ctx.user.email,
+    process.env.APP_NAME || 'MyApp'
+  );
+  const manualEntryKey = QRCodeUtils.formatSecretForManualEntry(setup.secret);
 
   return {
     success: true,
     secret: setup.secret,
-    qrCode: setup.qrCode,
+    qrCode: setup.qrCode, // URL for authenticator apps
+    qrCodeImage, // Data URL for displaying in UI
+    manualEntryKey, // Formatted secret for manual entry
     backupCodes: setup.backupCodes,
   };
 });
 
-// Enable 2FA Action
-export const enable2FAAction = authAction
+// Verify 2FA Setup Action
+export const verify2FASetupAction = authAction
   .schema(
     z.object({
-      code: z.string().min(6, "Code must be at least 6 characters"),
+      code: z.string().min(6, "Code must be at least 6 characters").max(8),
     })
   )
   .action(async ({ parsedInput, ctx }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
     const authService = AuthService.getInstance();
-    await authService.enable2FA(ctx.user.id, parsedInput.code);
+    await authService.enable2FA(ctx.user.id, parsedInput.code, ipAddress, userAgent);
 
     // Revalidate security pages
     revalidatePath("/profile/security");
@@ -509,6 +529,9 @@ export const enable2FAAction = authAction
     };
   });
 
+// Enable 2FA Action (alias for backward compatibility)
+export const enable2FAAction = verify2FASetupAction;
+
 // Disable 2FA Action
 export const disable2FAAction = authAction
   .schema(
@@ -517,8 +540,9 @@ export const disable2FAAction = authAction
     })
   )
   .action(async ({ parsedInput, ctx }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
     const authService = AuthService.getInstance();
-    await authService.disable2FA(ctx.user.id, parsedInput.password);
+    await authService.disable2FA(ctx.user.id, parsedInput.password, ipAddress, userAgent);
 
     // Revalidate security pages
     revalidatePath("/profile/security");
@@ -529,3 +553,154 @@ export const disable2FAAction = authAction
       message: "Two-factor authentication disabled successfully!",
     };
   });
+
+// Generate new backup codes Action
+export const generate2FABackupCodesAction = authAction
+  .schema(
+    z.object({
+      password: z.string().min(1, "Password is required"),
+    })
+  )
+  .action(async ({ parsedInput, ctx }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
+    const authService = AuthService.getInstance();
+    const newBackupCodes = await authService.generateNewBackupCodes(
+      ctx.user.id, 
+      parsedInput.password, 
+      ipAddress, 
+      userAgent
+    );
+
+    // Revalidate security pages
+    revalidatePath("/profile/security");
+
+    return {
+      success: true,
+      backupCodes: newBackupCodes,
+      message: "New backup codes generated successfully!",
+    };
+  });
+
+// Verify 2FA Code Action (for general verification)
+export const verify2FACodeAction = authAction
+  .schema(
+    z.object({
+      code: z.string().min(6, "Code must be at least 6 characters").max(8),
+    })
+  )
+  .action(async ({ parsedInput, ctx }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
+    const authService = AuthService.getInstance();
+    const isValid = await authService.verify2FACode(
+      ctx.user.id, 
+      parsedInput.code, 
+      ipAddress, 
+      userAgent
+    );
+
+    return {
+      success: isValid,
+      message: isValid ? "Code verified successfully!" : "Invalid code",
+    };
+  });
+
+// Session Management Actions
+
+// Get User Sessions Action
+export const getUserSessionsAction = authAction.action(async ({ ctx }) => {
+  const { SessionService } = await import("@/services/SessionService");
+  const sessionService = SessionService.getInstance();
+  
+  const sessions = await sessionService.getUserSessions(
+    ctx.user.id,
+    ctx.sessionToken,
+    true // activeOnly
+  );
+
+  return {
+    success: true,
+    sessions,
+  };
+});
+
+// Revoke Session Action
+export const revokeSessionAction = authAction
+  .schema(
+    z.object({
+      sessionId: z.string().min(1, "Session ID is required"),
+    })
+  )
+  .action(async ({ parsedInput, ctx }) => {
+    const { userAgent, ipAddress } = await getClientInfo();
+    const { SessionService } = await import("@/services/SessionService");
+    const { SecurityAuditLogService } = await import("@/services/SecurityAuditLogService");
+    
+    const sessionService = SessionService.getInstance();
+    const auditService = SecurityAuditLogService.getInstance();
+    
+    // Revoke the session
+    const success = await sessionService.revokeSessionById(parsedInput.sessionId);
+    
+    if (success) {
+      // Log the session revocation in audit log
+      await auditService.logAuthEvent(
+        SecurityAction.SESSION_TERMINATED,
+        {
+          userId: ctx.user.id,
+          ipAddress,
+          userAgent,
+          eventData: {
+            action: 'session_revoked_by_user',
+            sessionId: parsedInput.sessionId,
+            revokedBy: 'user_action'
+          }
+        }
+      );
+    }
+
+    return {
+      success,
+      message: success 
+        ? "Session revoked successfully" 
+        : "Failed to revoke session",
+    };
+  });
+
+// Revoke All Other Sessions Action
+export const revokeAllOtherSessionsAction = authAction.action(async ({ ctx }) => {
+  const { userAgent, ipAddress } = await getClientInfo();
+  const { SessionService } = await import("@/services/SessionService");
+  const { SecurityAuditLogService } = await import("@/services/SecurityAuditLogService");
+  
+  const sessionService = SessionService.getInstance();
+  const auditService = SecurityAuditLogService.getInstance();
+  
+  // Revoke all other sessions except current
+  const revokedCount = await sessionService.revokeAllUserSessions(
+    ctx.user.id,
+    ctx.sessionToken
+  );
+  
+  if (revokedCount > 0) {
+    // Log the bulk session revocation in audit log
+    await auditService.logAuthEvent(
+      SecurityAction.SESSION_TERMINATED,
+      {
+        userId: ctx.user.id,
+        ipAddress,
+        userAgent,
+        eventData: {
+          action: 'bulk_session_revocation',
+          revokedCount,
+          revokedBy: 'user_action'
+        }
+      }
+    );
+  }
+
+  return {
+    success: true,
+    revokedCount,
+    message: `Revoked ${revokedCount} other session${revokedCount !== 1 ? 's' : ''}`,
+  };
+});

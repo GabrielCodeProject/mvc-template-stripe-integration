@@ -278,7 +278,7 @@ export default function AuthManager() {
                 Requires Verification:{" "}
                 {state.authState.requiresVerification.toString()}
               </div>
-              {state.user && <div>User: {state.user.email}</div>}
+              {state.user && <div>User: {String(state.user.email || 'N/A')}</div>}
             </div>
           </div>
         )}

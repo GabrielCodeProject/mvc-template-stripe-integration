@@ -28,6 +28,8 @@ model User {
   image             String?
   phone             String?
   twoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret   String?   // Encrypted TOTP secret
+  backupCodes       String[]  // Encrypted backup codes
   isActive          Boolean   @default(true)
   role              String    @default("CUSTOMER")
   stripeCustomerId  String?   @unique
@@ -39,10 +41,12 @@ model User {
   accounts          Account[]
   sessions          Session[]
   passwordResetTokens PasswordResetToken[]
+  auditLogs         SecurityAuditLog[]
 
   @@index([email])
   @@index([role])
   @@index([createdAt])
+  @@index([twoFactorEnabled])
   @@map("users")
 }
 
@@ -155,22 +159,39 @@ model IpRateLimit {
   @@map("ip_rate_limits")
 }
 
-// Security audit log for tracking authentication events
+// Enhanced security audit log for comprehensive event tracking
 model SecurityAuditLog {
   id          String   @id @default(cuid())
   userId      String?
   email       String?
-  action      String   // 'password_reset_requested', 'password_reset_completed', 'login_failed', etc.
-  details     Json?    // Additional context (IP, user agent, etc.)
-  success     Boolean
+  eventType   String   // Categorical event types: 'AUTH', 'USER_MGMT', 'SECURITY', 'DATA_ACCESS'
+  action      String   // Specific action: 'login', 'logout', 'password_reset', 'failed_login', etc.
+  eventData   Json?    // Structured event context and metadata
+  success     Boolean  @default(true)
+  severity    String   @default("INFO") // INFO, WARN, ERROR, CRITICAL
   ipAddress   String?
   userAgent   String?
+  sessionId   String?
+  requestId   String?  // For correlating requests
+  resource    String?  // Resource being accessed/modified
+  checksum    String?  // For tamper detection (SHA-256 hash of core fields)
   createdAt   DateTime @default(now())
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([email])
+  @@index([eventType])
   @@index([action])
+  @@index([success])
+  @@index([severity])
   @@index([createdAt])
   @@index([ipAddress])
+  @@index([sessionId])
+  @@index([requestId])
+  @@index([checksum])
+  // Composite indexes for common queries
+  @@index([userId, eventType, createdAt])
+  @@index([eventType, success, createdAt])
+  @@index([ipAddress, action, createdAt])
   @@map("security_audit_logs")
 }

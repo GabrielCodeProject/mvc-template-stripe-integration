@@ -425,11 +425,13 @@ export class PasswordResetRepository {
         data: {
           userId: auditEntry.userId,
           email: auditEntry.email,
+          eventType: 'AUTH',
           action: auditEntry.action,
           success: auditEntry.success,
+          severity: 'INFO',
           ipAddress: auditEntry.ipAddress,
           userAgent: auditEntry.userAgent,
-          details: auditEntry.details as any, // Prisma JSON type
+          eventData: auditEntry.details as any, // Prisma JSON type
           createdAt: auditEntry.createdAt,
         },
       });

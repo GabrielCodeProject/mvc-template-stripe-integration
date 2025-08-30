@@ -242,25 +242,13 @@ export class AuthRepository {
     
     if (twoFactorSecret !== undefined) updates.twoFactorSecret = twoFactorSecret;
     if (backupCodes !== undefined) updates.backupCodes = backupCodes;
+    if (enabled !== undefined) updates.twoFactorEnabled = enabled;
 
-    await Promise.all([
-      // Update account
-      prisma.account.updateMany({
-        where: {
-          userId,
-          providerId: 'credentials'
-        },
-        data: updates
-      }),
-      // Update user if enabled status changed
-      enabled !== undefined ? prisma.user.update({
-        where: { id: userId },
-        data: {
-          twoFactorEnabled: enabled,
-          updatedAt: new Date()
-        }
-      }) : Promise.resolve()
-    ]);
+    // Update user table directly for 2FA fields
+    await prisma.user.update({
+      where: { id: userId },
+      data: updates
+    });
   }
 
   // Update last login
