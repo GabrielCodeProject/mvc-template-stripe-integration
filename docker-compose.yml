@@ -1,0 +1,11 @@
+services:
+  db: #use docker debug in terminal to get a docker console inside the container
+    image: postgres:latest
+    container_name: mvp-pattern
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: template
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-template}
+    ports:
+      - "5433:5432"
