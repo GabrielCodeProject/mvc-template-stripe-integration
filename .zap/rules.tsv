@@ -1,0 +1,34 @@
+# ZAP Security Scanning Rules for Profile Management
+# Format: rule_id	action	parameter	value
+
+# Ignore false positives for development
+10021	IGNORE	/api/auth/	# Authentication endpoints
+10015	IGNORE	/uploads/	# File upload endpoints (handled by application logic)
+
+# High priority security checks
+10010	FAIL	/api/profile/	# SQL Injection in profile endpoints
+10011	FAIL	/api/profile/	# XSS in profile data
+10012	FAIL	/api/uploads/	# File upload vulnerabilities
+10040	FAIL	*	# Information disclosure
+10042	FAIL	*	# Source code disclosure
+10043	FAIL	*	# Directory traversal
+
+# Medium priority checks  
+10020	WARN	*	# Missing security headers
+10016	WARN	*	# Web browser XSS protection
+10017	WARN	*	# Content security policy
+10094	WARN	*	# Cookie security
+
+# Authentication and session management
+10201	FAIL	/api/auth/	# Weak authentication
+10202	FAIL	/api/auth/	# Session management
+10203	FAIL	/api/auth/	# Cookie security
+
+# API-specific rules
+90001	FAIL	/api/	# Improper input validation
+90002	FAIL	/api/profile/	# Mass assignment
+90003	FAIL	/api/uploads/	# Unrestricted file upload
+
+# OAuth security
+90010	FAIL	/api/oauth/	# OAuth implementation issues
+90011	FAIL	/api/oauth/	# CSRF in OAuth flows

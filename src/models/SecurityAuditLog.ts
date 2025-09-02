@@ -43,6 +43,23 @@ export enum SecurityAction {
   USER_ACTIVATED = 'user_activated',
   USER_DEACTIVATED = 'user_deactivated',
   
+  // Profile management
+  PROFILE_VIEW = 'profile_view',
+  PROFILE_UPDATE = 'profile_update',
+  AVATAR_UPDATE = 'avatar_update',
+  AVATAR_DELETE = 'avatar_delete',
+  AVATAR_UPLOAD_INITIATED = 'avatar_upload_initiated',
+  AVATAR_UPLOAD_FAILED = 'avatar_upload_failed',
+  
+  // OAuth and account linking
+  OAUTH_LINK = 'oauth_link',
+  OAUTH_UNLINK = 'oauth_unlink',
+  OAUTH_LINK_INITIATED = 'oauth_link_initiated',
+  
+  // File management
+  FILE_ACCESS = 'file_access',
+  UPLOAD_TOKEN_GENERATED = 'upload_token_generated',
+  
   // Email verification
   EMAIL_VERIFICATION_SENT = 'email_verification_sent',
   EMAIL_VERIFIED = 'email_verified',

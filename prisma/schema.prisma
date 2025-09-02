@@ -38,15 +38,31 @@ model User {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
   lastLoginAt       DateTime?
+  
+  // Profile fields
+  bio                 String?   // User bio/description
+  avatarUrl           String?   // Profile avatar image URL
+  phoneNumber         String?   // Profile phone number (different from auth phone)
+  dateOfBirth         DateTime? // Date of birth
+  location            String?   // User location
+  website             String?   // Personal website URL
+  socialLinks         Json?     // Social media links (Twitter, LinkedIn, GitHub, etc.)
+  preferences         Json?     // User preferences (theme, notifications, privacy settings)
+  lastProfileUpdate   DateTime? // Last time profile was updated
+  profileCompleteness Int       @default(0) // Profile completion percentage (0-100)
+  
   accounts          Account[]
   sessions          Session[]
   passwordResetTokens PasswordResetToken[]
   auditLogs         SecurityAuditLog[]
+  linkedAccounts    LinkedAccount[]
 
   @@index([email])
   @@index([role])
   @@index([createdAt])
   @@index([twoFactorEnabled])
+  @@index([lastProfileUpdate])
+  @@index([profileCompleteness])
   @@map("users")
 }
 
@@ -80,6 +96,34 @@ model Account {
   @@index([resetToken])
   @@index([resetTokenHash])
   @@map("accounts")
+}
+
+// OAuth account linking for profile management
+model LinkedAccount {
+  id             String   @id @default(cuid())
+  userId         String
+  provider       String   // 'google', 'github', 'twitter', 'linkedin'
+  providerId     String   // Provider's user ID
+  providerEmail  String?  // Provider's email
+  displayName    String?  // Display name from provider
+  profileUrl     String?  // Profile URL from provider
+  avatarUrl      String?  // Avatar URL from provider
+  accessToken    String?  // Encrypted access token
+  refreshToken   String?  // Encrypted refresh token
+  expiresAt      DateTime?
+  scope          String?  // OAuth scopes granted
+  isActive       Boolean  @default(true)
+  linkedAt       DateTime @default(now())
+  lastSyncAt     DateTime?
+  metadata       Json?    // Additional provider-specific data
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([userId])
+  @@index([provider])
+  @@index([providerId])
+  @@index([isActive])
+  @@map("linked_accounts")
 }
 
 model Session {
